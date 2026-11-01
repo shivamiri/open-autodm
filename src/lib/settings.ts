@@ -22,6 +22,13 @@ export interface MetaSettings {
    * verification accepts a signature matching either.
    */
   metaFbAppSecret: string | null;
+  /**
+   * Facebook Login for Business configuration ID (Unified Login). Required
+   * to build the OAuth URL; null until saved from the Setup Wizard.
+   * Not a secret - Meta says the config_id identifies the configuration
+   * but grants no data access by itself.
+   */
+  metaConfigId: string | null;
   webhookVerifyToken: string;
   setupCompleted: boolean;
 }
@@ -30,6 +37,7 @@ interface SettingsRow {
   meta_app_id: string | null;
   meta_app_secret_encrypted: string | null;
   meta_fb_app_secret_encrypted: string | null;
+  meta_config_id: string | null;
   webhook_verify_token: string | null;
   setup_completed: boolean;
 }
@@ -44,7 +52,7 @@ export async function getMetaSettings(): Promise<MetaSettings | null> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('app_settings')
-    .select('meta_app_id, meta_app_secret_encrypted, meta_fb_app_secret_encrypted, webhook_verify_token, setup_completed')
+    .select('meta_app_id, meta_app_secret_encrypted, meta_fb_app_secret_encrypted, meta_config_id, webhook_verify_token, setup_completed')
     .eq('id', 1)
     .maybeSingle<SettingsRow>();
 
@@ -71,6 +79,7 @@ export async function getMetaSettings(): Promise<MetaSettings | null> {
     metaAppId: data.meta_app_id,
     metaAppSecret: secret,
     metaFbAppSecret: fbSecret,
+    metaConfigId: data.meta_config_id,
     webhookVerifyToken: data.webhook_verify_token,
     setupCompleted: data.setup_completed,
   };
@@ -82,6 +91,7 @@ export async function saveMetaSettings(input: {
   metaAppId: string;
   metaAppSecret: string;
   metaFbAppSecret?: string | null;
+  metaConfigId?: string | null;
   webhookVerifyToken: string;
 }): Promise<void> {
   const env = getEnv();
@@ -95,6 +105,11 @@ export async function saveMetaSettings(input: {
         meta_app_id: input.metaAppId.trim(),
         meta_app_secret_encrypted: encrypt(input.metaAppSecret.trim(), env.TOKEN_ENCRYPTION_KEY),
         meta_fb_app_secret_encrypted: fbSecret ? encrypt(fbSecret, env.TOKEN_ENCRYPTION_KEY) : null,
+        // Only touched when the caller supplies it - a re-save that omits
+        // the field must not wipe a stored Configuration ID.
+        ...(input.metaConfigId !== undefined
+          ? { meta_config_id: input.metaConfigId?.trim() || null }
+          : {}),
         webhook_verify_token: input.webhookVerifyToken,
         setup_completed: true,
       },
