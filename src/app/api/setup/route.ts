@@ -28,6 +28,13 @@ const SaveSetupSchema = z.object({
     .regex(/^[0-9a-f]{32}$/i, 'Facebook App Secret must be 32 hex characters')
     .optional()
     .or(z.literal('').transform(() => undefined)),
+  // Optional but required for Unified Login: the Facebook Login for Business
+  // configuration ID. Meta calls it config_id; it is not a secret.
+  metaConfigId: z
+    .string()
+    .regex(/^[0-9A-Za-z_-]{5,100}$/, 'Configuration ID looks wrong - copy it exactly from the Meta portal')
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
 });
 
 function cronSnippet(appUrl: string): string {
@@ -62,13 +69,14 @@ export async function GET(request: Request): Promise<Response> {
   const db = createServiceClient();
   const { data: row } = await db
     .from('app_settings')
-    .select('meta_app_id, webhook_verify_token, setup_completed')
+    .select('meta_app_id, meta_config_id, webhook_verify_token, setup_completed')
     .eq('id', 1)
     .maybeSingle();
 
   return Response.json({
     configured: !!settings,
     metaAppId: (row?.meta_app_id as string | null) ?? null,
+    metaConfigId: (row?.meta_config_id as string | null) ?? null,
     webhookVerifyToken: (row?.webhook_verify_token as string | null) ?? null,
     webhookUrl: `${appUrl}/api/webhook`,
     oauthRedirectUri: `${appUrl}/api/instagram/callback`,
@@ -114,6 +122,7 @@ export async function POST(request: Request): Promise<Response> {
       metaAppId: parsed.data.metaAppId,
       metaAppSecret: parsed.data.metaAppSecret,
       metaFbAppSecret: parsed.data.metaFbAppSecret ?? null,
+      metaConfigId: parsed.data.metaConfigId,
       webhookVerifyToken: verifyToken,
     });
 
