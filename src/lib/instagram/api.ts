@@ -4,9 +4,11 @@
  * Battle-tested against the live Instagram API. Key facts this
  * module encodes (learned the hard way - do not "simplify" them away):
  *
- *  - Instagram Business Login tokens call graph.instagram.com, NOT graph.facebook.com.
- *  - Button templates (postback buttons) work on graph.instagram.com with
- *    Instagram Login user access tokens - used for the 2-step quick-reply flow.
+ *  - Unified Login (Facebook Login for Business) tokens call graph.facebook.com
+ *    with the explicit Instagram account ID in the path (Meta's official
+ *    endpoint mapping keeps the same paths as Instagram Login).
+ *  - Button templates (postback buttons) work with these tokens - used for
+ *    the 2-step quick-reply flow.
  *  - Postback payloads carry "SESSION_{uuid}_STEP_{n}" - routing is ALWAYS by
  *    payload, never by visible button text.
  *  - Access tokens are decrypted at call time and never logged.
@@ -18,8 +20,8 @@ import { classifyMetaError } from '@/lib/instagram/errors';
 
 const logger = createLogger('instagram');
 
-export const META_API_VERSION = 'v23.0';
-const META_GRAPH_BASE = `https://graph.instagram.com/${META_API_VERSION}`;
+export const META_API_VERSION = 'v26.0';
+const META_GRAPH_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
 
 interface MetaSendMessageResponse {
   recipient_id: string;
@@ -391,7 +393,7 @@ export const WEBHOOK_SUBSCRIBED_FIELDS = 'comments,messages,messaging_postbacks,
 
 export async function subscribeToWebhookFields(igUserId: string, accessToken: string): Promise<{ ok: boolean; body: string }> {
   const params = new URLSearchParams({ subscribed_fields: WEBHOOK_SUBSCRIBED_FIELDS, access_token: accessToken });
-  const res = await fetch(`https://graph.instagram.com/${META_API_VERSION}/${igUserId}/subscribed_apps`, {
+  const res = await fetch(`${META_GRAPH_BASE}/${igUserId}/subscribed_apps`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
@@ -408,7 +410,7 @@ export async function subscribeToWebhookFields(igUserId: string, accessToken: st
 }
 
 export async function getSubscribedFields(igUserId: string, accessToken: string): Promise<{ ok: boolean; fields: string[]; raw: string }> {
-  const res = await fetch(`https://graph.instagram.com/${META_API_VERSION}/${igUserId}/subscribed_apps?access_token=${accessToken}`);
+  const res = await fetch(`${META_GRAPH_BASE}/${igUserId}/subscribed_apps?access_token=${accessToken}`);
   const raw = await res.text();
   if (!res.ok) return { ok: false, fields: [], raw };
   type SubscribedAppsResponse = { data?: Array<{ subscribed_fields?: string[] }>; subscribed_fields?: string[] };
