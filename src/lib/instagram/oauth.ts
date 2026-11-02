@@ -1,34 +1,53 @@
 /**
- * Instagram Business Login OAuth helpers.
+ * Instagram OAuth helpers - Instagram API with Unified Login
+ * (Facebook Login for Business).
  *
- * Uses instagram.com/oauth/authorize - NOT Facebook's dialog/oauth. This
- * yields an Instagram User Access Token, which is what the Instagram API
- * with Instagram Login requires for DMs and comment management.
+ * New Meta apps can no longer use Instagram Business Login (Meta, Oct 2026):
+ * there is no Instagram app ID/secret for them and instagram.com/oauth/authorize
+ * rejects them with "Invalid platform app". Unified Login instead:
  *
- * Hard-won facts preserved from the original build:
- *  - The code→token exchange MUST be multipart/form-data (FormData). Meta's
- *    docs use curl -F; x-www-form-urlencoded fails silently.
- *  - Short-lived token (1h) → long-lived (60d) via graph.instagram.com.
- *  - page_id does not exist under Instagram Business Login - never expect it.
- *  - A wrong client_secret surfaces as a misleading "redirect_uri not
- *    identical" error from Meta.
+ *  - Authorize at www.facebook.com/dialog/oauth with the META app ID and a
+ *    Facebook Login for Business configuration ID (config_id). No scope list -
+ *    the configuration carries the permissions.
+ *  - Exchange the code at graph.facebook.com/<version>/oauth/access_token with
+ *    the META app ID + META app secret. The result is a Business Integration
+ *    System User Access Token (SUAT) belonging to the client's business
+ *    portfolio - it survives the connecting person leaving the business.
+ *  - With a SUAT, /me is the system user, NOT the Instagram account. Account
+ *    discovery: GET /me/assigned_instagram_accounts.
+ *  - Token expiry is chosen in the Meta configuration; when Meta returns no
+ *    expires_in, the expiry is UNKNOWN and stored as NULL - never invented.
+ *  - SUATs are not refreshable through the old ig_refresh_token endpoint, so
+ *    refreshLongLivedToken reports 'invalid' and both consumers (cron
+ *    auto-refresh + the manual refresh API) surface "reconnect needed"
+ *    instead of silently retrying.
+ *
+ * Legacy Instagram Login helpers (exchangeForLongLivedToken,
+ * getInstagramProfile) are kept only so older call sites keep compiling
+ * during the migration; they are dead code for Unified Login apps.
  */
 
 import { SignJWT, jwtVerify } from 'jose';
 import { getEnv } from '@/lib/env';
 import { randomToken } from '@/lib/crypto';
-import type { IgShortLivedTokenResponse, IgLongLivedTokenResponse, IgUserProfile } from '@/lib/types';
+import type { IgLongLivedTokenResponse, IgUserProfile } from '@/lib/types';
 
-const IG_OAUTH_URL = 'https://www.instagram.com/oauth/authorize';
-const IG_TOKEN_URL = 'https://api.instagram.com/oauth/access_token';
+const META_API_VERSION = 'v26.0';
+const FB_OAUTH_URL = 'https://www.facebook.com/dialog/oauth';
+const FB_GRAPH_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
+
+// Legacy Instagram Login endpoints - used only by the legacy helpers below.
 const IG_LONG_LIVED_URL = 'https://graph.instagram.com/access_token';
 const IG_GRAPH_BASE = 'https://graph.instagram.com';
 
-/** Scopes required for AutoDM (Instagram Business Login permission names). */
+/**
+ * Permissions live in the Meta configuration (config_id) now, not in a scope
+ * list. Kept as documentation of what the configuration must contain.
+ */
 export const REQUIRED_SCOPES = [
-  'instagram_business_basic',
-  'instagram_business_manage_messages',
-  'instagram_business_manage_comments',
+  'instagram_basic',
+  'instagram_manage_messages',
+  'instagram_manage_comments',
 ].join(',');
 
 // ── CSRF state JWT ──────────────────────────────────────────────────────────
@@ -50,20 +69,34 @@ export async function signOAuthState(userId: string): Promise<string> {
 export async function verifyOAuthState(token: string): Promise<{ userId: string }> {
   const { payload } = await jwtVerify(token, stateSecret());
   if (typeof payload['userId'] !== 'string') throw new Error('Invalid state payload');
-  return { userId: payload['userId'] };
+  return { userId: payload['userId'] as string };
 }
 
-// ── OAuth URL + token exchange ──────────────────────────────────────────────
+// ── OAuth URL + token exchange (Unified Login) ──────────────────────────────
 
-export function buildOAuthUrl(appId: string, redirectUri: string, state: string): string {
+export function buildOAuthUrl(appId: string, redirectUri: string, state: string, configId?: string): string {
+  if (!configId) {
+    throw new Error('setup_required: Configuration ID missing - save it in the Setup Wizard (Step 2) first.');
+  }
   const params = new URLSearchParams({
     client_id: appId,
+    config_id: configId,
     redirect_uri: redirectUri,
-    scope: REQUIRED_SCOPES,
     response_type: 'code',
+    // Always show both the Facebook and Instagram login options, even when a
+    // Facebook session already exists in the browser.
+    prompt: 'login',
     state,
   });
-  return `${IG_OAUTH_URL}?${params.toString()}`;
+  return `${FB_OAUTH_URL}?${params.toString()}`;
+}
+
+export interface UnifiedTokenResponse {
+  access_token: string;
+  token_type?: string;
+  /** Seconds until expiry. ABSENT for never-expiring configurations - treat
+   *  absence as UNKNOWN, never as an invented date. */
+  expires_in?: number;
 }
 
 export async function exchangeCodeForToken(
@@ -71,31 +104,72 @@ export async function exchangeCodeForToken(
   appId: string,
   appSecret: string,
   redirectUri: string
-): Promise<IgShortLivedTokenResponse> {
-  // Meta requires multipart/form-data for this endpoint
-  const form = new FormData();
-  form.append('client_id', appId);
-  form.append('client_secret', appSecret);
-  form.append('grant_type', 'authorization_code');
-  form.append('redirect_uri', redirectUri);
-  form.append('code', code);
-
-  const res = await fetch(IG_TOKEN_URL, { method: 'POST', body: form });
-  if (!res.ok) {
-    const body = await res.text();
+): Promise<UnifiedTokenResponse> {
+  // Server-to-server exchange with the META app credentials (NOT any
+  // Instagram app pair - those do not exist for new apps).
+  const params = new URLSearchParams({
+    client_id: appId,
+    client_secret: appSecret,
+    redirect_uri: redirectUri,
+    code,
+  });
+  const res = await fetch(`${FB_GRAPH_BASE}/oauth/access_token?${params.toString()}`);
+  const json = (await res.json()) as UnifiedTokenResponse & { error?: { message?: string } };
+  if (!res.ok || !json.access_token) {
     throw new Error(
-      `Instagram token exchange failed: ${res.status} ${body} | redirect_uri="${redirectUri}". ` +
-        'If Meta says "redirect_uri not identical", double-check your App Secret - a wrong secret produces this exact misleading error.'
+      `Meta token exchange failed: ${res.status} ${JSON.stringify(json)} | redirect_uri="${redirectUri}". ` +
+        'Check the Meta app ID/secret and that the Redirect URL in the configuration matches exactly.'
     );
   }
-  // Meta returns either a flat object or one wrapped in `data: [ ... ]`
-  const json = (await res.json()) as IgShortLivedTokenResponse | { data?: IgShortLivedTokenResponse[] };
-  const token = 'data' in json && Array.isArray(json.data) ? json.data[0] : (json as IgShortLivedTokenResponse);
-  if (!token?.access_token) {
-    throw new Error(`Instagram token exchange returned no access_token: ${JSON.stringify(json)}`);
-  }
-  return token;
+  return json;
 }
+
+export interface AssignedInstagramAccount {
+  id: string;
+  username?: string;
+}
+
+/** Lists the Instagram professional accounts the client shared during login. */
+export async function getAssignedInstagramAccounts(accessToken: string): Promise<AssignedInstagramAccount[]> {
+  const params = new URLSearchParams({ fields: 'id,username', access_token: accessToken });
+  const res = await fetch(`${FB_GRAPH_BASE}/me/assigned_instagram_accounts?${params.toString()}`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Instagram account discovery failed: ${res.status} ${body}`);
+  }
+  const json = (await res.json()) as { data?: AssignedInstagramAccount[] };
+  return json.data ?? [];
+}
+
+/** The business portfolio that owns the shared assets (needed by Meta's
+ *  token-management API). Non-fatal when unavailable. */
+export async function getClientBusinessId(accessToken: string): Promise<string | null> {
+  const params = new URLSearchParams({ fields: 'client_business_id', access_token: accessToken });
+  const res = await fetch(`${FB_GRAPH_BASE}/me?${params.toString()}`);
+  if (!res.ok) return null;
+  const json = (await res.json()) as { client_business_id?: string };
+  return json.client_business_id ?? null;
+}
+
+/**
+ * Unified Login SUATs cannot be refreshed through the old Instagram Login
+ * endpoint (graph.instagram.com/refresh_access_token). Meta's Business
+ * Integration System User Access Token Management API can manage them via the
+ * client business ID - not wired up yet. Returning 'invalid' makes both
+ * consumers (cron auto-refresh, manual refresh API) surface "reconnect
+ * needed" visibly instead of silently retrying a dead endpoint.
+ */
+export async function refreshLongLivedToken(
+  _currentToken: string
+): Promise<{ access_token: string; expires_in: number } | { error: 'invalid' | 'failed'; status: number; body: string }> {
+  return {
+    error: 'invalid',
+    status: 400,
+    body: 'Unified Login tokens are not refreshed by this endpoint - reconnect the Instagram account from Settings if it stops working.',
+  };
+}
+
+// ── Legacy Instagram Login helpers (dead code for Unified Login apps) ───────
 
 export async function exchangeForLongLivedToken(
   shortLivedToken: string,
@@ -124,18 +198,4 @@ export async function getInstagramProfile(accessToken: string): Promise<IgUserPr
     throw new Error(`Instagram profile fetch failed: ${res.status} ${body}`);
   }
   return (await res.json()) as IgUserProfile;
-}
-
-/** Refreshes a still-valid long-lived token for another 60 days. */
-export async function refreshLongLivedToken(
-  currentToken: string
-): Promise<{ access_token: string; expires_in: number } | { error: 'invalid' | 'failed'; status: number; body: string }> {
-  const res = await fetch(
-    `${IG_GRAPH_BASE}/refresh_access_token?grant_type=ig_refresh_token&access_token=${currentToken}`
-  );
-  if (!res.ok) {
-    const body = await res.text();
-    return { error: res.status === 400 || res.status === 401 ? 'invalid' : 'failed', status: res.status, body };
-  }
-  return (await res.json()) as { access_token: string; expires_in: number };
 }
