@@ -22,10 +22,18 @@ export async function GET(request: Request): Promise<Response> {
       { status: 409 }
     );
   }
+  // Unified Login needs the Facebook Login for Business configuration ID
+  // (Setup Wizard step 2). Hard-guard instead of producing a broken OAuth URL.
+  if (!settings.metaConfigId) {
+    return Response.json(
+      { error: 'setup_required', message: 'Add the Configuration ID in the Setup Wizard (Step 2) before connecting Instagram.' },
+      { status: 409 }
+    );
+  }
 
   const state = await signOAuthState(user.id);
   const redirectUri = `${getAppUrl(request)}/api/instagram/callback`;
-  const url = buildOAuthUrl(settings.metaAppId, redirectUri, state);
+  const url = buildOAuthUrl(settings.metaAppId, redirectUri, state, settings.metaConfigId);
 
   return Response.json({ url });
 }
