@@ -12,7 +12,7 @@ import { createServiceClient } from '@/lib/supabase/service';
 import {
   verifyOAuthState,
   exchangeCodeForToken,
-  getAssignedInstagramAccounts,
+  getAssignedInstagramAccountsWithDiagnostics,
   getClientBusinessId,
 } from '@/lib/instagram/oauth';
 import { subscribeToWebhookFields } from '@/lib/instagram/api';
@@ -66,7 +66,7 @@ export async function GET(request: Request): Promise<Response> {
     // User Access Token. /me is the system user, NOT the Instagram account -
     // discover the shared IG accounts via /me/assigned_instagram_accounts.
     const token = await exchangeCodeForToken(code, settings.metaAppId, settings.metaAppSecret, redirectUri);
-    const accounts = await getAssignedInstagramAccounts(token.access_token);
+    const { accounts, diagnostics } = await getAssignedInstagramAccountsWithDiagnostics(token.access_token);
     // Connecting the wrong account is hard to spot later, so an ambiguous
     // result stops the flow: the user reconnects sharing exactly one account.
     if (accounts.length > 1) {
@@ -78,6 +78,21 @@ export async function GET(request: Request): Promise<Response> {
     }
     const account = accounts.at(0);
     if (!account) {
+      // Discovery returned HTTP 200 with a genuinely empty list (an error
+      // payload would have thrown above). Log the whitelisted response SHAPE
+      // only - never tokens, messages or raw bodies - so the debug panel can
+      // distinguish a true empty grant from a Meta-side error.
+      debugLog('oauth', 'warn', 'discovery_empty', 'error', 'Instagram account discovery returned an empty list', {
+        userId,
+        httpStatus: diagnostics.httpStatus,
+        hadDataKey: diagnostics.hadDataKey,
+        dataLength: diagnostics.dataLength,
+        hadErrorKey: diagnostics.hadErrorKey,
+        errorType: diagnostics.errorType,
+        errorCode: diagnostics.errorCode,
+        errorSubcode: diagnostics.errorSubcode,
+        fbtraceId: diagnostics.fbtraceId,
+      });
       throw new Error('No Instagram account was shared during login - reconnect and select your Instagram account.');
     }
 
