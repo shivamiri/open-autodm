@@ -2,9 +2,9 @@
  * GET /api/instagram/callback - Instagram redirects here after consent.
  *
  * Flow (identity comes exclusively from the signed state JWT - CSRF-safe):
- *   verify state → code → short-lived token → long-lived token (60d)
- *   → fetch profile → AES-256-GCM encrypt token → upsert instagram_accounts
- *   → subscribe account to webhook fields → redirect to /settings
+ *   verify state → code → Unified Login system-user token
+ *   → discover shared IG account → AES-256-GCM encrypt token
+ *   → upsert instagram_accounts → subscribe to webhook fields → /settings
  */
 
 import { getMetaSettings } from '@/lib/settings';
@@ -12,8 +12,8 @@ import { createServiceClient } from '@/lib/supabase/service';
 import {
   verifyOAuthState,
   exchangeCodeForToken,
-  exchangeForLongLivedToken,
-  getInstagramProfile,
+  getAssignedInstagramAccounts,
+  getClientBusinessId,
 } from '@/lib/instagram/oauth';
 import { subscribeToWebhookFields } from '@/lib/instagram/api';
 import { encrypt } from '@/lib/crypto';
@@ -61,15 +61,32 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const redirectUri = `${appUrl}/api/instagram/callback`;
 
-    debugLog('oauth', 'info', 'oauth_exchange', 'processing', 'Exchanging authorization code for tokens', { userId });
-    const shortLived = await exchangeCodeForToken(code, settings.metaAppId, settings.metaAppSecret, redirectUri);
-    const longLived = await exchangeForLongLivedToken(shortLived.access_token, settings.metaAppSecret);
-    const profile = await getInstagramProfile(longLived.access_token);
+    debugLog('oauth', 'info', 'oauth_exchange', 'processing', 'Exchanging authorization code for token', { userId });
+    // Unified Login: the exchanged token is a Business Integration System
+    // User Access Token. /me is the system user, NOT the Instagram account -
+    // discover the shared IG accounts via /me/assigned_instagram_accounts.
+    const token = await exchangeCodeForToken(code, settings.metaAppId, settings.metaAppSecret, redirectUri);
+    const accounts = await getAssignedInstagramAccounts(token.access_token);
+    // Connecting the wrong account is hard to spot later, so an ambiguous
+    // result stops the flow: the user reconnects sharing exactly one account.
+    if (accounts.length > 1) {
+      const names = accounts.map((a) => `@${a.username ?? a.id}`).join(', ');
+      throw new Error(
+        `More than one Instagram account was shared during login (${names}). ` +
+          'Reconnect and share ONLY the single account you want to automate.'
+      );
+    }
+    const account = accounts.at(0);
+    if (!account) {
+      throw new Error('No Instagram account was shared during login - reconnect and select your Instagram account.');
+    }
 
     const env = getEnv();
     const db = createServiceClient();
-    const encryptedToken = encrypt(longLived.access_token, env.TOKEN_ENCRYPTION_KEY);
-    const expiresAt = new Date(Date.now() + longLived.expires_in * 1000);
+    const encryptedToken = encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY);
+    // Meta omits expires_in for never-expiring configurations. Store NULL
+    // ("unknown") rather than inventing an expiry date.
+    const expiresAt = typeof token.expires_in === 'number' ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null;
 
     // Guarantee the FK target exists. Users created in the Supabase dashboard
     // BEFORE the migrations were applied have no profiles row (the auto-create
@@ -77,21 +94,33 @@ export async function GET(request: Request): Promise<Response> {
     // never hit a foreign-key violation.
     await db.from('profiles').upsert({ id: userId }, { onConflict: 'id', ignoreDuplicates: true });
 
-    const { error } = await db.from('instagram_accounts').upsert(
-      {
-        user_id: userId,
-        instagram_user_id: profile.user_id,
-        username: profile.username,
-        name: profile.name ?? null,
-        profile_picture_url: profile.profile_picture_url ?? null,
-        access_token_encrypted: encryptedToken,
-        token_expires_at: expiresAt.toISOString(),
-        is_active: true,
-        paused_until: null,
-        pause_reason: null,
-      },
-      { onConflict: 'instagram_user_id', ignoreDuplicates: false }
-    );
+    // Ownership check BEFORE writing: instagram_user_id is globally unique,
+    // and an upsert would silently reassign the row (and overwrite the token)
+    // if another local user already connected this IG account.
+    const { data: existing } = await db
+      .from('instagram_accounts')
+      .select('id, user_id')
+      .eq('instagram_user_id', account.id)
+      .maybeSingle();
+
+    if (existing && existing.user_id !== userId) {
+      return settingsRedirect('instagram_error=account_already_connected');
+    }
+
+    const tokenFields = {
+      username: account.username ?? 'unknown',
+      name: null,
+      profile_picture_url: null,
+      access_token_encrypted: encryptedToken,
+      token_expires_at: expiresAt,
+      is_active: true,
+      paused_until: null,
+      pause_reason: null,
+    };
+
+    const { error } = existing
+      ? await db.from('instagram_accounts').update(tokenFields).eq('id', existing.id)
+      : await db.from('instagram_accounts').insert({ user_id: userId, instagram_user_id: account.id, ...tokenFields });
 
     if (error) {
       if (error.code === '23505') {
@@ -100,21 +129,33 @@ export async function GET(request: Request): Promise<Response> {
       throw error;
     }
 
-    // Per-account webhook subscription - without this NO events are delivered.
-    await subscribeToWebhookFields(profile.user_id, longLived.access_token);
+    // Client business ID (which portfolio owns the shared assets) - logged
+    // for future token-management use; not stored yet.
+    getClientBusinessId(token.access_token).then((id) =>
+      debugLog('oauth', 'info', 'client_business', 'ok', `Client business ID: ${id ?? 'unavailable'}`, { userId })
+    );
 
-    debugLog('oauth', 'info', 'oauth_complete', 'ok', `Instagram @${profile.username} connected`, { userId });
-    logger.info({ userId, username: profile.username }, 'Instagram account connected');
+    // Per-account webhook subscription - without this NO events are delivered.
+    // It reports failure instead of throwing, so surface it visibly rather
+    // than redirecting to a false "connected" success.
+    const sub = await subscribeToWebhookFields(account.id, token.access_token);
+    if (!sub.ok) {
+      debugLog('oauth', 'error', 'webhook_subscribe', 'error',
+        `Webhook subscription failed for @${account.username ?? account.id}: ${sub.body.slice(0, 200)}`, { userId });
+      return settingsRedirect(
+        `instagram_error=webhook_subscription_failed&debug=${encodeURIComponent(
+          'Account connected, but Meta rejected the webhook subscription. Check Setup Wizard Step 3 (Webhooks), then reconnect.'
+        )}`
+      );
+    }
+
+    debugLog('oauth', 'info', 'oauth_complete', 'ok', `Instagram @${account.username ?? account.id} connected`, { userId });
+    logger.info({ userId, username: account.username }, 'Instagram account connected');
     return settingsRedirect('instagram_connected=true');
   } catch (err) {
     const message = describeError(err);
     logger.error({ err, userId }, 'Instagram OAuth callback failed');
     debugLog('oauth', 'error', 'oauth_failed', 'error', `OAuth exchange failed: ${message.slice(0, 300)}`, { userId });
-    // While the Meta app is in Development mode, an Instagram account that
-    // isn't an accepted tester fails the long-lived exchange with this error.
-    if (message.includes('Unsupported request - method type: get')) {
-      return settingsRedirect('instagram_error=test_user_required');
-    }
     return settingsRedirect(`instagram_error=server_error&debug=${encodeURIComponent(message.slice(0, 200))}`);
   }
 }
