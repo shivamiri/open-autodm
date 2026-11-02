@@ -97,6 +97,7 @@ export default function SetupPage() {
     const [appId, setAppId] = useState("");
     const [appSecret, setAppSecret] = useState("");
     const [fbAppSecret, setFbAppSecret] = useState("");
+    const [configId, setConfigId] = useState("");
     const [saveError, setSaveError] = useState<string | null>(null);
     const [justSaved, setJustSaved] = useState(false);
 
@@ -107,9 +108,10 @@ export default function SetupPage() {
                 metaAppId: appId.trim(),
                 metaAppSecret: appSecret.trim(),
                 ...(fbAppSecret.trim() ? { metaFbAppSecret: fbAppSecret.trim() } : {}),
+                ...(configId.trim() ? { metaConfigId: configId.trim() } : {}),
             },
             {
-                onSuccess: () => { setJustSaved(true); setAppSecret(""); setFbAppSecret(""); },
+                onSuccess: () => { setJustSaved(true); setAppSecret(""); setFbAppSecret(""); setConfigId(""); },
                 onError: (err) => setSaveError(err.message),
             }
         );
@@ -150,16 +152,17 @@ export default function SetupPage() {
                 <NumberedList items={[
                     <>Go to <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener noreferrer" className="text-primary font-medium underline underline-offset-2">developers.facebook.com/apps</a> and click <b>Create App</b>.</>,
                     <>Use case <b>Other</b> → app type <b>Business</b>.</>,
-                    <>In the app dashboard: <b>Instagram → Set up</b> (adds &ldquo;Instagram API with Instagram Login&rdquo;).</>,
-                    <>Go to <b>Instagram → API setup with Instagram login → 3. Set up Instagram business login</b> and copy the <b>Instagram app ID</b> and <b>Instagram app secret</b> shown there. Not the pair under App settings → Basic - those belong to the parent Meta app and Instagram login rejects them with &ldquo;Invalid platform app&rdquo;.</>,
+                    <>Use case <b>Manage messaging &amp; content on Instagram</b>, then <b>Customize → API setup with Unified login</b> (Meta no longer offers Instagram login to new apps).</>,
+                    <>Connect a <b>business portfolio</b> when asked, then <b>Create new configuration</b> with permissions <b>instagram_basic</b>, <b>instagram_manage_messages</b> and <b>instagram_manage_comments</b>. Copy its <b>Configuration ID</b> (config_id) and set the <b>Redirect URL</b> from Step 3 below.</>,
+                    <>Copy the <b>Meta app ID</b> and <b>Meta app secret</b> from <b>App settings → Basic</b>. With Unified login these ARE the right pair - the exchange call uses them.</>,
                     <>Your Instagram must be a <b>Business or Creator</b> account (switch in the app: Settings → Account type).</>,
                 ]} />
                 <div className="mt-4 flex items-start gap-2 text-[12px] text-muted-foreground bg-muted/50 rounded-lg px-3 py-2.5">
                     <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
                     <span>
-                        Your app starts in <b>Development mode</b> - perfect for building and testing. In dev mode, automations
-                        work for accounts that hold a <b>role on your app</b> (you + testers - see Step 5). To let the
-                        general public trigger them, submit the free Meta <b>App Review</b> once testing passes.
+                        Your app starts in <b>Development mode</b> with <b>Standard Access</b> - perfect for building and testing
+                        with accounts that hold a <b>role on your app</b> (you + testers - see Step 5). To serve the
+                        general public, request <b>Advanced Access</b> via the free Meta App Review and switch to Live mode.
                     </span>
                 </div>
             </StepCard>
@@ -174,7 +177,7 @@ export default function SetupPage() {
                 )}
                 <div className="space-y-3">
                     <div>
-                        <label className="micro-label block mb-1">Instagram app ID</label>
+                        <label className="micro-label block mb-1">Meta app ID</label>
                         <input
                             value={appId}
                             onChange={(e) => setAppId(e.target.value)}
@@ -183,7 +186,7 @@ export default function SetupPage() {
                         />
                     </div>
                     <div>
-                        <label className="micro-label block mb-1">Instagram app secret</label>
+                        <label className="micro-label block mb-1">Meta app secret</label>
                         <input
                             type="password"
                             value={appSecret}
@@ -209,6 +212,20 @@ export default function SetupPage() {
                             &ldquo;signature mismatch&rdquo; on real events, paste the App Secret from App settings → Basic here.
                         </p>
                     </div>
+                    <div>
+                        <label className="micro-label block mb-1">Configuration ID <span className="normal-case font-normal opacity-70">(Unified login)</span></label>
+                        <input
+                            value={configId}
+                            onChange={(e) => setConfigId(e.target.value)}
+                            placeholder={setup?.metaConfigId ?? "config_id from your Meta configuration"}
+                            className={inputCls}
+                        />
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                            Meta portal → your app → API setup with Unified login → your configuration → Login URL:
+                            the number after <code className="font-mono">config_id=</code>. Not a secret. Connect stays
+                            disabled until this is saved.
+                        </p>
+                    </div>
                     {saveError && <p className="text-[12px] text-destructive font-medium">{saveError}</p>}
                     {justSaved && <p className="text-[12px] text-secondary font-medium">Saved. Continue with Step 3.</p>}
                     <button
@@ -230,20 +247,20 @@ export default function SetupPage() {
                     <div className="space-y-5">
                         <div>
                             <p className="text-[13px] font-medium text-foreground mb-2.5">
-                                A. Webhooks - <span className="text-muted-foreground font-normal">Instagram → API setup with Instagram login → 2. Configure webhooks</span>
+                                A. Webhooks - <span className="text-muted-foreground font-normal">Meta portal → your app → Webhooks → Instagram</span>
                             </p>
                             <div className="space-y-2.5">
                                 <CopyField label="Callback URL" value={setup?.webhookUrl ?? ""} />
                                 <CopyField label="Verify token" value={setup?.webhookVerifyToken ?? ""} />
                             </div>
                             <p className="text-[11px] text-muted-foreground mt-2">
-                                Click <b>Verify and save</b>, then subscribe to <b>comments</b> and <b>messages</b>.
+                                Click <b>Verify and save</b>, then subscribe to <b>comments</b>, <b>messages</b>, <b>messaging_postbacks</b>, <b>message_reactions</b> and <b>message_edit</b>.
                             </p>
                         </div>
                         <div className="h-px bg-border" />
                         <div>
                             <p className="text-[13px] font-medium text-foreground mb-2.5">
-                                B. Business login - <span className="text-muted-foreground font-normal">3. Set up Instagram business login → Business login settings</span>
+                                B. Redirect URL - <span className="text-muted-foreground font-normal">API setup with Unified login → your configuration → Redirect URL</span>
                             </p>
                             <CopyField label="OAuth redirect URI" value={setup?.oauthRedirectUri ?? ""} />
                             <p className="text-[11px] text-muted-foreground mt-2">
@@ -257,8 +274,8 @@ export default function SetupPage() {
             {/* Step 4 */}
             <StepCard step={4} title="Enable the background engine" icon={Clock3}>
                 <p className="text-[13px] text-muted-foreground mb-3 leading-relaxed">
-                    Most DMs send instantly from the webhook. This cron delivers the rest - rate-limited overflow,
-                    retries, and automatic token refresh. In <b>Supabase → SQL Editor</b>, replace{" "}
+                    Most DMs send instantly from the webhook. This cron delivers the rest - rate-limited overflow
+                    and retries. In <b>Supabase → SQL Editor</b>, replace{" "}
                     <code className="font-mono text-[11px] bg-muted px-1 rounded">YOUR_CRON_SECRET</code> with your
                     deployment&apos;s CRON_SECRET and run:
                 </p>
@@ -283,24 +300,25 @@ export default function SetupPage() {
             <StepCard step={5} title="Who can trigger it" icon={Users}>
                 <div className="space-y-4 text-[13px] text-foreground/90 leading-relaxed">
                     <p>
-                        In <b>Development mode</b>, Instagram only delivers events for accounts holding a role on your app -
-                        on <b>both sides</b>: the account you connect <i>and</i> the audience accounts whose comments, DMs,
-                        or story replies trigger automations. A stranger&apos;s comment produces no webhook at all.
+                        Per Meta&apos;s docs, <b>Standard Access</b> (what a new app gets) is enough to test with people who
+                        hold a <b>role on your app</b> - the connected account and any testers you add below. Serving the
+                        general public needs <b>Advanced Access</b> and Live mode. Which audience events reach you in dev
+                        mode is something we&apos;ll confirm with a live test once connected.
                     </p>
                     <div>
                         <p className="font-medium text-foreground mb-2">Add a tester account:</p>
                         <NumberedList items={[
-                            <>Meta portal → your app → <b>App roles → Roles → Add people</b>.</>,
-                            <>Role <b>Instagram Tester</b> → their Instagram username → send the invite.</>,
-                            <>They accept <b>inside the Instagram app</b>: Settings → Website permissions / Apps and websites → <b>Tester invites → Accept</b>. Until then, their events are invisible to your webhook.</>,
+                            <>Meta portal → your app → <b>API setup with Unified login → Generate access tokens → Add account</b>.</>,
+                            <>Invite the Instagram professional account as an <b>Instagram Tester</b>.</>,
+                            <>They accept <b>on Instagram on the web</b>: Settings → Website permissions → Apps and websites → <b>Tester Invites</b>.</>,
                         ]} />
                     </div>
                     <div className="flex items-start gap-2 text-[12px] text-muted-foreground bg-muted/50 rounded-lg px-3 py-2.5">
                         <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
                         <span>
-                            <b>Going public:</b> to fire on comments from anyone, request <b>Advanced Access</b> via Meta&apos;s free
-                            App Review - upload a short screencast of your working flow. Typically approved in days; nothing in
-                            this app changes afterwards.
+                            <b>Going public:</b> to onboard people beyond your app&apos;s roles, request <b>Advanced Access</b> via
+                            Meta&apos;s free App Review - upload a short screencast of your working flow - and switch the app to
+                            Live mode. Nothing in this app changes afterwards.
                         </span>
                     </div>
                 </div>
