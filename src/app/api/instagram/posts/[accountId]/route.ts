@@ -15,7 +15,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const logger = createLogger('api:posts');
-const META_GRAPH_BASE = `https://graph.instagram.com/${META_API_VERSION}`;
+const META_GRAPH_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
 
 interface MetaMediaItem {
   id: string;
