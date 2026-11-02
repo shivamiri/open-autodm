@@ -141,6 +141,63 @@ export async function getAssignedInstagramAccounts(accessToken: string): Promise
   return json.data ?? [];
 }
 
+/**
+ * Diagnostics about the discovery RESPONSE SHAPE - never its secrets.
+ * Whitelisted Meta error fields only (type/code/subcode/fbtrace_id are
+ * Meta's own error taxonomy; error.message is deliberately EXCLUDED because
+ * external text is not inherently secret-free).
+ */
+export interface IgDiscoveryDiagnostics {
+  httpStatus: number;
+  hadDataKey: boolean;
+  dataLength: number;
+  hadErrorKey: boolean;
+  errorType?: string;
+  errorCode?: number;
+  errorSubcode?: number;
+  fbtraceId?: string;
+}
+
+export interface AssignedInstagramAccountsResult {
+  accounts: AssignedInstagramAccount[];
+  diagnostics: IgDiscoveryDiagnostics;
+}
+
+/**
+ * Same discovery as getAssignedInstagramAccounts, but returns response-shape
+ * diagnostics for the callback's failure logging, and throws on a Graph
+ * error payload EVEN when it arrives on HTTP 200 (Graph does that sometimes;
+ * it must not masquerade as an empty account list). The thrown message
+ * carries only whitelisted error fields - it surfaces in the Settings
+ * banner's debug text, so never the raw body.
+ */
+export async function getAssignedInstagramAccountsWithDiagnostics(accessToken: string): Promise<AssignedInstagramAccountsResult> {
+  const params = new URLSearchParams({ fields: 'id,username', access_token: accessToken });
+  const res = await fetch(`${FB_GRAPH_BASE}/me/assigned_instagram_accounts?${params.toString()}`);
+  const json = (await res.json().catch(() => null)) as {
+    data?: AssignedInstagramAccount[];
+    error?: { type?: string; code?: number; error_subcode?: number; fbtrace_id?: string };
+  } | null;
+  const diagnostics: IgDiscoveryDiagnostics = {
+    httpStatus: res.status,
+    hadDataKey: !!json && Array.isArray(json.data),
+    dataLength: Array.isArray(json?.data) ? json.data.length : 0,
+    hadErrorKey: !!json?.error,
+    errorType: json?.error?.type,
+    errorCode: json?.error?.code,
+    errorSubcode: json?.error?.error_subcode,
+    fbtraceId: json?.error?.fbtrace_id,
+  };
+  if (!res.ok || !json || json.error) {
+    throw new Error(
+      `Instagram account discovery failed: status=${diagnostics.httpStatus} ` +
+        `type=${diagnostics.errorType ?? 'n/a'} code=${diagnostics.errorCode ?? 'n/a'} ` +
+        `subcode=${diagnostics.errorSubcode ?? 'n/a'} fbtrace=${diagnostics.fbtraceId ?? 'n/a'}`
+    );
+  }
+  return { accounts: json.data ?? [], diagnostics };
+}
+
 /** The business portfolio that owns the shared assets (needed by Meta's
  *  token-management API). Non-fatal when unavailable. */
 export async function getClientBusinessId(accessToken: string): Promise<string | null> {
